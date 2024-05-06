@@ -6,6 +6,13 @@
 #include "image.h"
 #include "matrix.h"
 #include <time.h>
+#define TWOPI 6.2831853
+
+// Calculate image derivatives Ix and Iy.
+// Calculate measures Ix^2, Iy^2, and Ix * Iy.
+// Calculate structure matrix S as weighted sum of nearby measures.
+// Calculate Harris "cornerness" as estimate of 2nd eigenvalue: det(S) - α trace(S)^2, α = .06
+// Run non-max suppression on response map
 
 // Frees an array of descriptors.
 // descriptor *d: the array.
@@ -83,8 +90,19 @@ void mark_corners(image im, descriptor *d, int n)
 // returns: single row image of the filter.
 image make_1d_gaussian(float sigma)
 {
-    // TODO: make separable 1d Gaussian.
-    return make_image(1,1,1);
+    int dim = ceil(6*sigma);
+    dim += ((dim % 2) ? 0 : 1);
+    int c = dim / 2;
+    image filter = make_image(dim, 1, 1);
+
+    for (int x = 0; x < filter.w; x++) {
+            filter.data[x] = 1 / (TWOPI * sigma * sigma) *
+                               exp(-((x-c)*(x-c) + (x-c)*(x-c)) / (2*sigma*sigma));
+    }
+
+    l1_normalize(filter);
+
+    return filter;
 }
 
 // Smooths an image using separable Gaussian filter.
@@ -93,8 +111,19 @@ image make_1d_gaussian(float sigma)
 // returns: smoothed image.
 image smooth_image(image im, float sigma)
 {
-    // TODO: use two convolutions with 1d gaussian filter.
-    return copy_image(im);
+    int x;
+    image gauss1,gauss2;
+
+    gauss1 = make_1d_gaussian(sigma);
+    gauss2 = make_image(1, gauss1.w, 1);
+    for (x = 0; x < gauss1.w; x++) {
+        gauss2.data[x] = gauss1.data[x];
+    }
+
+    im = convolve_image(im, gauss1, 1);
+    im = convolve_image(im, gauss2, 1);
+
+    return im;
 }
 
 // Calculate the structure matrix of an image.
@@ -104,9 +133,33 @@ image smooth_image(image im, float sigma)
 //          third channel is IxIy.
 image structure_matrix(image im, float sigma)
 {
-    image S = make_image(im.w, im.h, 3);
-    // TODO: calculate structure matrix for im.
-    return S;
+    // This will perform the first 3 steps of the algorithm: calculating derivatives, the corresponding measures, and the weighted sum of nearby derivative information.
+    // You can use Sobel filter and associated functions from HW2 to calculate the derivatives.
+    // The measures are element-wise multiplications.
+    // The weighted sum can be easily computed with a Gaussian blur as discussed in class.
+    // Use the parameter sigma to create the Gaussian kernel and convolve the result with it.
+    int pos;
+    image ret = make_image(im.w, im.h, 3);
+
+    image gx = make_gx_filter();
+    image gy = make_gy_filter();
+    image Ix = convolve_image(im, gx, 0);
+    image Iy = convolve_image(im, gy, 0);
+
+    // Calculate measures Ix^2, Iy^2, and Ix * Iy.
+    for (int x = 0; x < im.w; x++) {
+    for (int y = 0; y < im.h; y++) {
+            pos = x + y*im.w;
+            ret.data[pos + 0*im.w*im.h] = Ix.data[pos] * Ix.data[pos];
+            ret.data[pos + 1*im.w*im.h] = Iy.data[pos] * Iy.data[pos];
+            ret.data[pos + 2*im.w*im.h] = Ix.data[pos] * Iy.data[pos];
+    }
+    }
+
+    image gauss = make_gaussian_filter(sigma);
+    ret = convolve_image(ret, gauss, 1);
+
+    return ret;
 }
 
 // Estimate the cornerness of each pixel given a structure matrix S.
@@ -114,9 +167,32 @@ image structure_matrix(image im, float sigma)
 // returns: a response map of cornerness calculations.
 image cornerness_response(image S)
 {
+    // cornerness = det(S) - α trace(S)^2, α = .06
+    // det(S) = λ_1 * λ_2 = ad-bc
+    // trace(S) = a+d = λ_1 + λ_2
+
+    int pos;
+    float lam_1, lam_2;
+    float a, b, c, d;
+    float trace, det;
+    float alpha = 0.06;
     image R = make_image(S.w, S.h, 1);
-    // TODO: fill in R, "cornerness" for each pixel using the structure matrix.
-    // We'll use formulation det(S) - alpha * trace(S)^2, alpha = .06.
+
+    for (int x = 0; x < S.w; x++) {
+    for (int y = 0; y < S.h; y++) {
+	    pos = x + y * S.w;
+	    a = S.data[pos + 0 * S.w * S.h]; // Ix^2
+	    b = S.data[pos + 2 * S.w * S.h]; // IxIy
+	    c = S.data[pos + 2 * S.w * S.h]; // IyIx
+	    d = S.data[pos + 1 * S.w * S.h]; // Iy^2
+	    lam_1 = 1/2.0 * ((a+d) + sqrtf(4*b*c + (a-d)*(a-d)));
+	    lam_2 = 1/2.0 * ((a+d) - sqrtf(4*b*c + (a-d)*(a-d)));
+	    trace = lam_1 + lam_2;
+	    det = lam_1 * lam_2;
+	    R.data[pos] = det - alpha*trace*trace;
+    }
+    }
+
     return R;
 }
 
@@ -126,13 +202,25 @@ image cornerness_response(image S)
 // returns: image with only local-maxima responses within w pixels.
 image nms_image(image im, int w)
 {
-    image r = copy_image(im);
-    // TODO: perform NMS on the response map.
-    // for every pixel in the image:
-    //     for neighbors within w:
-    //         if neighbor response greater than pixel response:
-    //             set response to be very low (I use -999999 [why not 0??])
-    return r;
+
+    // For every pixel in im, check every neighbor within w pixels (Chebyshev distance).
+    // Equivalently, check the 2w+1 window centered at each pixel.
+    // If any responses are stronger, suppress that pixel's response (set it to a very low negative number).
+
+    image R = copy_image(im);
+    for (int x = 0; x < im.w; x++) {
+    for (int y = 0; y < im.h; y++) {
+	for (int offset_x = -w; offset_x <= w; offset_x++) {
+	for (int offset_y = -w; offset_y <= w; offset_y++) {
+	    if (get_pixel(im, x+offset_x, y+offset_y, 0) > get_pixel(im, x, y, 0)) {
+		set_pixel(R, x, y, 0, -9999.9);
+	    }
+	}
+	}
+    }
+    }
+
+    return R;
 }
 
 // Perform harris corner detection and extract features from the corners.
@@ -144,6 +232,9 @@ image nms_image(image im, int w)
 // returns: array of descriptors of the corners in the image.
 descriptor *harris_corner_detector(image im, float sigma, float thresh, int nms, int *n)
 {
+    // The function should return an array of descriptors for corners in the image.
+    // Code for calculating the descriptors is provided. Also, set the integer *n to be the number of corners found in the image.
+
     // Calculate structure matrix
     image S = structure_matrix(im, sigma);
 
@@ -154,18 +245,32 @@ descriptor *harris_corner_detector(image im, float sigma, float thresh, int nms,
     image Rnms = nms_image(R, nms);
 
 
-    //TODO: count number of responses over threshold
-    int count = 1; // change this
+    // TODO: count number of responses over threshold
 
-    
-    *n = count; // <- set *n equal to number of corners in image.
-    descriptor *d = calloc(count, sizeof(descriptor));
+    // int count = 1; // change this
+    int count = 0;
+    for (int i = 0; i < (Rnms.w*Rnms.h); i++) {
+	if (Rnms.data[i] > thresh) count++;
+    }
+
+    // *n = count; // <- set *n equal to number of corners in image.
+    // descriptor *d = calloc(count, sizeof(descriptor));
     //TODO: fill in array *d with descriptors of corners, use describe_index.
 
+    *n = count;
+    descriptor *d = calloc(count, sizeof(descriptor));
+    for (int i = 0, j = 0; i < (Rnms.w*Rnms.h); i++) {
+	if (Rnms.data[i] > thresh) {
+	    d[j] = describe_index(im, i);
+	    if (j == count) break; else j++;
+	}
+    }
 
+    // Free images
     free_image(S);
     free_image(R);
     free_image(Rnms);
+
     return d;
 }
 

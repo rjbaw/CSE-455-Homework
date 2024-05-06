@@ -196,6 +196,19 @@ void test_hsv_to_rgb()
     free_image(c);
 }
 
+void test_scale()
+{
+    image im = load_image("data/dog.jpg");
+    image c = copy_image(im);
+    scale_image(c, 1, .1);
+    //TEST(within_eps(c.data[0], im.data[0], .1*EPS));
+    //TEST(within_eps(c.data[im.w*im.h + 13], im.data[im.w*im.h+13] + .1, EPS));
+    //TEST(within_eps(c.data[2*im.w*im.h + 72], im.data[2*im.w*im.h+72], EPS));
+    //TEST(within_eps(c.data[im.w*im.h + 47], im.data[im.w*im.h+47] + .1, EPS));
+    free_image(im);
+    free_image(c);
+}
+
 void test_hw0()
 {
     test_get_pixel();
@@ -206,6 +219,7 @@ void test_hw0()
     test_grayscale();
     test_rgb_to_hsv();
     test_hsv_to_rgb();
+    test_scale();
     printf("%d tests, %d passed, %d failed\n", tests_total, tests_total-tests_fail, tests_fail);
 }
 
